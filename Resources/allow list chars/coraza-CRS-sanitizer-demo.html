@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Coraza WAF Sanitizer Demo</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg0: #0a0e17; --bg1: #0d1117; --bg2: #161b22; --border: #21262d;
+    --text: #c9d1d9; --dim: #484f58; --muted: #8b949e; --bright: #f0f6fc;
+    --blue: #1f6feb; --green: #3fb950; --red: #f85149; --yellow: #d29922; --orange: #f0883e;
+    --mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'Consolas', 'Menlo', monospace;
+    --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    --radius: 8px;
+  }
+  body { font-family: var(--mono); background: var(--bg0); color: var(--text); min-height: 100vh; }
+
+  @keyframes scanline { from { transform: translateY(-100%); } to { transform: translateY(100vh); } }
+  @keyframes pulse { 0%,100% { border-color: rgba(31,111,235,0.25); } 50% { border-color: rgba(31,111,235,0.6); } }
+  @keyframes flash { 0%,100% { opacity: 1; } 50% { opacity: 0.65; } }
+  @keyframes slideup { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+  .scan-wrap { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }
+  .scan-beam { width: 100%; height: 2px; background: linear-gradient(90deg, transparent, rgba(31,111,235,0.07), transparent); animation: scanline 8s linear infinite; }
+
+  .header { border-bottom: 1px solid var(--border); background: linear-gradient(180deg, var(--bg1), var(--bg0)); padding: 20px 24px 14px; position: relative; z-index: 1; }
+  .header-row { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .logo { width: 30px; height: 30px; border-radius: 7px; background: linear-gradient(135deg, var(--blue), #0550ae); display: grid; place-items: center; font: 700 15px/1 var(--sans); color: #fff; }
+  .header-title { font: 700 18px/1.2 var(--sans); color: var(--bright); letter-spacing: -0.02em; }
+  .badge { font: 500 9px/1 var(--mono); color: var(--blue); background: rgba(31,111,235,0.12); padding: 3px 7px; border-radius: 4px; letter-spacing: 0.08em; text-transform: uppercase; }
+  .header-sub { font-size: 11px; color: var(--dim); }
+
+  .container { padding: 20px 24px; position: relative; z-index: 1; max-width: 940px; }
+  .label { font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 7px; }
+  .label .arrow { margin-right: 4px; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 16px; }
+  .chip { padding: 5px 11px; border-radius: 6px; border: 1px solid var(--border); background: rgba(255,255,255,0.015); font: 11px/1.3 var(--mono); color: var(--muted); cursor: pointer; transition: all 0.15s; user-select: none; }
+  .chip:hover { background: rgba(31,111,235,0.15); border-color: var(--blue); transform: translateY(-1px); color: var(--bright); }
+
+  #inputBox {
+    width: 100%; padding: 13px 15px; background: var(--bg1); color: var(--text);
+    border: 1px solid var(--border); border-radius: var(--radius);
+    font: 13px/1.6 var(--mono); resize: vertical; animation: pulse 3s ease infinite;
+  }
+  #inputBox:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 3px rgba(31,111,235,0.13); animation: none; }
+  #inputBox.locked { animation: none; }
+
+  .input-foot { display: flex; justify-content: space-between; align-items: center; margin: 7px 0 16px; }
+  .char-info { font-size: 10px; color: var(--dim); }
+  .run-btn {
+    padding: 7px 18px; border-radius: 7px; border: none; cursor: pointer;
+    background: linear-gradient(135deg, var(--blue), #0550ae); color: #fff;
+    font: 600 12px/1.3 var(--sans); letter-spacing: 0.01em; transition: all 0.2s;
+  }
+  .run-btn:disabled { background: var(--border); color: var(--dim); cursor: default; }
+  .run-btn:not(:disabled):hover { filter: brightness(1.12); }
+
+  .results { animation: slideup 0.25s ease; }
+  .metrics { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+  .metric { flex: 1 1 90px; padding: 9px 12px; background: var(--bg1); border: 1px solid var(--border); border-radius: var(--radius); }
+  .metric-lbl { font-size: 9px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 3px; }
+  .metric-val { font: 600 13px/1.3 var(--sans); color: var(--text); }
+  .metric-val.ok { color: var(--green); }
+  .metric-val.bad { color: var(--red); }
+  .metric-val.warn { color: var(--yellow); }
+  .metric-val.blink { animation: flash 0.9s ease 2; }
+
+  .tabs { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+  .tab { padding: 7px 14px; border: none; border-bottom: 2px solid transparent; background: none; color: var(--dim); font: 500 11px/1.3 var(--sans); cursor: pointer; text-transform: capitalize; transition: all 0.2s; }
+  .tab:hover { background: rgba(255,255,255,0.04); }
+  .tab.on { color: var(--bright); border-bottom-color: var(--blue); }
+
+  .pane { background: var(--bg1); border: 1px solid var(--border); border-radius: 10px; padding: 15px; min-height: 160px; }
+
+  .banner { padding: 11px 14px; border-radius: 7px; margin-bottom: 12px; font: 600 12px/1.4 var(--sans); }
+  .banner.blocked { background: rgba(248,81,73,0.07); border: 1px solid rgba(248,81,73,0.18); color: var(--red); }
+  .banner.passed { background: rgba(63,185,80,0.07); border: 1px solid rgba(63,185,80,0.18); color: var(--green); }
+
+  .rule-row { display: flex; align-items: center; gap: 9px; padding: 7px 11px; border-radius: 5px; background: rgba(255,255,255,0.015); margin-bottom: 5px; }
+  .sev { font: 700 8px/1 var(--mono); padding: 2px 5px; border-radius: 3px; letter-spacing: 0.04em; }
+  .sev-CRITICAL { background: #fee2e2; color: #991b1b; }
+  .sev-WARNING { background: #fef3c7; color: #92400e; }
+  .sev-NOTICE { background: #dbeafe; color: #1e40af; }
+  .bl-CRITICAL { border-left: 3px solid #fca5a5; }
+  .bl-WARNING { border-left: 3px solid #fcd34d; }
+  .bl-NOTICE { border-left: 3px solid #93c5fd; }
+  .rule-id { font-size: 10px; color: var(--muted); }
+  .rule-msg { font-size: 11px; color: var(--text); flex: 1; }
+  .rule-tag { font-size: 9px; color: var(--dim); background: rgba(255,255,255,0.03); padding: 2px 7px; border-radius: 4px; }
+
+  .detail-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 13px; background: rgba(255,255,255,0.008); margin-bottom: 9px; }
+  .detail-title { font: 700 13px/1.3 var(--sans); color: var(--bright); }
+  .detail-head { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
+  .detail-act { font-size: 9px; padding: 2px 7px; border-radius: 4px; }
+  .detail-act-block { background: rgba(248,81,73,0.1); color: var(--red); }
+  .detail-act-log { background: rgba(210,153,34,0.1); color: var(--yellow); }
+  .detail-meta { font-size: 9px; color: var(--dim); margin-bottom: 6px; }
+  .detail-patterns { margin-top: 7px; font-size: 10px; color: var(--muted); background: var(--bg2); padding: 7px 9px; border-radius: 5px; word-break: break-all; max-height: 72px; overflow: auto; }
+
+  .code { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 13px; font: 12px/1.6 var(--mono); white-space: pre-wrap; word-break: break-all; }
+  .code.strike { color: var(--red); text-decoration: line-through; text-decoration-color: rgba(248,81,73,0.35); }
+  .code.safe { color: var(--green); border-color: rgba(63,185,80,0.18); }
+  .code.audit { font-size: 11px; color: var(--muted); line-height: 1.7; }
+
+  .empty { text-align: center; padding: 44px 20px; color: var(--dim); }
+  .empty-icon { font-size: 36px; margin-bottom: 10px; opacity: 0.3; }
+  .empty-title { font: 500 13px/1.3 var(--sans); color: var(--muted); margin-bottom: 5px; }
+
+  .hist { margin-top: 18px; }
+  .hist-item { display: flex; align-items: center; gap: 9px; padding: 5px 11px; border-radius: 5px; cursor: pointer; border: 1px solid transparent; margin-bottom: 2px; transition: all 0.15s; }
+  .hist-item:hover { background: rgba(255,255,255,0.025); }
+  .hist-item.cur { background: rgba(31,111,235,0.05); border-color: rgba(31,111,235,0.13); }
+  .hist-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .hist-dot.ok { background: var(--green); }
+  .hist-dot.bad { background: var(--red); }
+  .hist-txt { font-size: 10px; color: var(--muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hist-n { font-size: 9px; color: var(--dim); }
+  .note { margin-top: 10px; font-size: 10px; color: var(--dim); font-style: italic; }
+  .hidden { display: none !important; }
+  .gap16 { margin-top: 16px; }
+</style>
+</head>
+<body>
+
+<div class="scan-wrap"><div class="scan-beam"></div></div>
+
+<div class="header">
+  <div class="header-row">
+    <div class="logo">C</div>
+    <span class="header-title">Coraza WAF Sanitizer</span>
+    <span class="badge">demo</span>
+  </div>
+  <span class="header-sub">Simulated SecLang rule engine &mdash; SQLi &middot; XSS &middot; RCE &middot; Protocol anomaly detection</span>
+</div>
+
+<div class="container">
+  <div class="label">Test payloads</div>
+  <div class="chips" id="chips"></div>
+
+  <div class="label"><span class="arrow" style="color:var(--green)">&#9656;</span>Input text</div>
+  <textarea id="inputBox" rows="4" placeholder="Type or paste potentially malicious input here..."></textarea>
+  <div class="input-foot">
+    <span class="char-info" id="charInfo">0 chars &middot; Ctrl+Enter to analyze</span>
+    <button class="run-btn" id="runBtn" disabled>&#9654; Analyze</button>
+  </div>
+
+  <div id="results" class="hidden"></div>
+  <div id="empty" class="empty">
+    <div class="empty-icon">&#x1F6E1;&#xFE0F;</div>
+    <div class="empty-title">Coraza WAF Input Sanitizer</div>
+    <div style="font-size:11px">Choose a test payload above or type your own input to analyze</div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+/** @typedef {{ id:number, phase:number, action:string, severity:string, tag:string, msg:string, patterns:RegExp[] }} Rule */
+/** @typedef {{ ruleId:number, phase:number, action:string, severity:string, tag:string, msg:string, matchCount:number, patternStrs:string[] }} Match */
+/** @typedef {{ txId:string, matches:Match[], anomalyScore:number, sanitized:string, durationUs:string, disruptive:boolean, action:string, ts:string }} Result */
+/** @typedef {{ input:string, result:Result, ts:number }} HistoryEntry */
+
+/** @type {Rule[]} */
+var RULES = [
+  {
+    id: 1001, phase: 2, action: "block", severity: "CRITICAL", tag: "attack-sqli",
+    msg: "SQL Injection Attack Detected",
+    patterns: [
+      /('|"|;)\s*(--)/, /(\b(union|select|insert|update|delete|drop|alter|create|exec|execute)\b)/i,
+      /(\b(or|and)\b\s+[\d'"].*?[=<>])/i, /('\s*(or|and)\s+')/i,
+      /(;\s*(drop|delete|update|insert)\b)/i, /(\b(benchmark|sleep|waitfor)\s*\()/i,
+      /(\/\*[\s\S]*?\*\/)/, /(\binto\s+outfile\b)/i, /(\bload_file\s*\()/i,
+      /(0x[0-9a-fA-F]+)/, /(\bchar\s*\()/i
+    ]
+  },
+  {
+    id: 1002, phase: 2, action: "block", severity: "CRITICAL", tag: "attack-xss",
+    msg: "XSS Attack Detected",
+    patterns: [
+      /<\s*script[\s>]/i, /on\w+\s*=\s*["']?[^"']*["']?/i,
+      /javascript\s*:/i, /vbscript\s*:/i,
+      /<\s*iframe[\s>]/i, /<\s*embed[\s>]/i, /<\s*object[\s>]/i,
+      /<\s*img\s[^>]*\bonerror\b/i, /<\s*svg[\s>]/i,
+      /(eval|alert|confirm|prompt|document\.(cookie|write|location))\s*\(/i,
+      /(<\s*\/?\s*\w+[^>]*>)/
+    ]
+  },
+  {
+    id: 1003, phase: 2, action: "log", severity: "WARNING", tag: "attack-rce",
+    msg: "Remote Command Execution Attempt",
+    patterns: [
+      /(\|\||&&)\s*\w+/i, /(;\s*(ls|cat|rm|wget|curl|bash|sh|nc)\b)/i,
+      /(`[^`]+`)/, /(\$\(\s*\w+)/, /(\.\.\/)/, /(\/etc\/passwd)/i
+    ]
+  },
+  {
+    id: 1004, phase: 2, action: "log", severity: "NOTICE", tag: "protocol-violation",
+    msg: "Protocol-level Anomaly Detected",
+    patterns: [
+      /(%00|%0d|%0a|%25)/i, /(\x00|\x0d|\x0a)/, /(&#\d+;)/, /(&#x[0-9a-f]+;)/i
+    ]
+  }
+];
+
+/** @type {{label:string, value:string}[]} */
+var PRESETS = [
+  { label: "SQL Injection",    value: "admin' OR '1'='1' -- " },
+  { label: "XSS Script Tag",   value: "<script>alert(\"XSS\")<\/script>" },
+  { label: "XSS Event",        value: "<img src=x onerror=\"alert(1)\">" },
+  { label: "Cmd Injection",    value: "; cat /etc/passwd" },
+  { label: "Union SQLi",       value: "1 UNION SELECT username, password FROM users--" },
+  { label: "Safe Input",       value: "Hello, my name is Alice and I love pancakes!" }
+];
+
+/** @type {Record<string,string>} */
+var ESC_MAP = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;", "/": "&#x2F;", "`": "&#x60;" };
+
+/** @param {string} s @returns {string} */
+function escHtml(s) {
+  return s.replace(/[&<>"'`/]/g, function (c) { return ESC_MAP[c] || c; });
+}
+
+/** @param {string} raw @returns {string} */
+function sanitize(raw) {
+  var r = raw;
+  r = r.replace(/<\s*script[^>]*>[\s\S]*?<\s*\/\s*script\s*>/gi, "[BLOCKED:script]");
+  r = r.replace(/<\s*iframe[^>]*>[\s\S]*?<\s*\/\s*iframe\s*>/gi, "[BLOCKED:iframe]");
+  r = r.replace(/<\s*object[^>]*>[\s\S]*?<\s*\/\s*object\s*>/gi, "[BLOCKED:object]");
+  r = r.replace(/<\s*embed[^>]*\/?>/gi, "[BLOCKED:embed]");
+  r = r.replace(/on\w+\s*=\s*["'][^"']*["']/gi, "[BLOCKED:event-handler]");
+  r = r.replace(/javascript\s*:/gi, "[BLOCKED:js-uri]");
+  return escHtml(r);
+}
+
+/** @param {string} input @returns {Result} */
+function runEngine(input) {
+  var t0 = performance.now();
+  /** @type {Match[]} */
+  var matches = [];
+  var score = 0;
+  /** @type {Record<string,number>} */
+  var sevWeight = { CRITICAL: 5, WARNING: 3, NOTICE: 1 };
+
+  for (var i = 0; i < RULES.length; i++) {
+    var rule = RULES[i];
+    var hits = rule.patterns.filter(function (p) { return p.test(input); });
+    if (hits.length > 0) {
+      matches.push({
+        ruleId: rule.id, phase: rule.phase, action: rule.action,
+        severity: rule.severity, tag: rule.tag, msg: rule.msg,
+        matchCount: hits.length, patternStrs: hits.map(function (p) { return p.toString(); })
+      });
+      score += (sevWeight[rule.severity] || 1) * hits.length;
+    }
+  }
+
+  var sanitized = sanitize(input);
+  var durationUs = ((performance.now() - t0) * 1000).toFixed(0);
+  var disruptive = matches.some(function (m) { return m.action === "block"; });
+
+  return {
+    txId: "TX-" + Date.now().toString(36).toUpperCase(),
+    matches: matches,
+    anomalyScore: score,
+    sanitized: sanitized,
+    durationUs: durationUs,
+    disruptive: disruptive,
+    action: disruptive ? "deny (403)" : "pass",
+    ts: new Date().toLocaleTimeString()
+  };
+}
+
+// ── DOM ──────────────────────────────────────────────────────────────
+
+var inputBox   = /** @type {HTMLTextAreaElement} */ (document.getElementById("inputBox"));
+var runBtn     = /** @type {HTMLButtonElement} */   (document.getElementById("runBtn"));
+var charInfo   = /** @type {HTMLElement} */         (document.getElementById("charInfo"));
+var resultsDiv = /** @type {HTMLElement} */         (document.getElementById("results"));
+var emptyDiv   = /** @type {HTMLElement} */         (document.getElementById("empty"));
+var chipsDiv   = /** @type {HTMLElement} */         (document.getElementById("chips"));
+
+/** @type {Result|null} */  var currentResult = null;
+/** @type {string} */       var activeTab = "overview";
+/** @type {HistoryEntry[]} */ var scanHistory = [];
+
+// ── Presets ──────────────────────────────────────────────────────────
+
+PRESETS.forEach(function (p) {
+  var el = document.createElement("div");
+  el.className = "chip";
+  el.textContent = p.label;
+  el.addEventListener("click", function () {
+    inputBox.value = p.value;
+    inputBox.classList.remove("locked");
+    currentResult = null;
+    resultsDiv.classList.add("hidden");
+    emptyDiv.classList.remove("hidden");
+    syncUI();
+    inputBox.focus();
+  });
+  chipsDiv.appendChild(el);
+});
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+function syncUI() {
+  charInfo.textContent = inputBox.value.length + " chars \u00B7 Ctrl+Enter to analyze";
+  runBtn.disabled = !inputBox.value.trim();
+}
+
+// ── Events ───────────────────────────────────────────────────────────
+
+inputBox.addEventListener("input", function () {
+  syncUI();
+  if (currentResult) {
+    inputBox.classList.remove("locked");
+    currentResult = null;
+    resultsDiv.classList.add("hidden");
+    emptyDiv.classList.remove("hidden");
+  }
+});
+
+document.addEventListener("keydown", function (e) {
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter") { e.preventDefault(); doAnalyze(); }
+});
+
+runBtn.addEventListener("click", doAnalyze);
+
+function doAnalyze() {
+  var val = inputBox.value.trim();
+  if (!val) return;
+  currentResult = runEngine(val);
+  inputBox.classList.add("locked");
+  scanHistory.unshift({ input: val, result: currentResult, ts: Date.now() });
+  if (scanHistory.length > 20) scanHistory = scanHistory.slice(0, 20);
+  activeTab = "overview";
+  emptyDiv.classList.add("hidden");
+  render();
+}
+
+// ── Render ───────────────────────────────────────────────────────────
+
+function render() {
+  if (!currentResult) return;
+  var r = currentResult;
+  var raw = inputBox.value;
+  var h = "";
+
+  h += '<div class="results">';
+
+  // ── Metrics ──
+  var mets = [
+    { l: "Action",    v: r.action,              c: r.disruptive ? "bad blink" : "ok" },
+    { l: "Score",     v: "" + r.anomalyScore,   c: r.anomalyScore > 5 ? "bad" : r.anomalyScore > 0 ? "warn" : "ok" },
+    { l: "Rules Hit", v: "" + r.matches.length, c: "" },
+    { l: "Time",      v: r.durationUs + "\u03BCs", c: "" },
+    { l: "TX",        v: r.txId,                c: "" }
+  ];
+  h += '<div class="metrics">';
+  for (var i = 0; i < mets.length; i++) {
+    h += '<div class="metric"><div class="metric-lbl">' + mets[i].l + '</div>'
+       + '<div class="metric-val ' + mets[i].c + '">' + escHtml(mets[i].v) + '</div></div>';
+  }
+  h += '</div>';
+
+  // ── Tabs ──
+  var tabs = ["overview", "matches", "sanitized", "audit"];
+  h += '<div class="tabs">';
+  for (var t = 0; t < tabs.length; t++) {
+    h += '<button class="tab' + (tabs[t] === activeTab ? " on" : "") + '" data-tab="' + tabs[t] + '">' + tabs[t] + '</button>';
+  }
+  h += '</div>';
+
+  // ── Pane ──
+  h += '<div class="pane">';
+
+  if (activeTab === "overview") {
+    h += r.disruptive
+      ? '<div class="banner blocked">\u26D4 REQUEST BLOCKED \u2014 ' + r.matches.length + ' rule(s) triggered, anomaly score: ' + r.anomalyScore + '</div>'
+      : '<div class="banner passed">\u2705 REQUEST PASSED \u2014 No blocking rules triggered</div>';
+    if (r.matches.length > 0) {
+      for (var j = 0; j < r.matches.length; j++) {
+        var m = r.matches[j];
+        h += '<div class="rule-row bl-' + m.severity + '">'
+           + '<span class="sev sev-' + m.severity + '">' + m.severity + '</span>'
+           + '<span class="rule-id">#' + m.ruleId + '</span>'
+           + '<span class="rule-msg">' + escHtml(m.msg) + '</span>'
+           + '<span class="rule-tag">' + escHtml(m.tag) + '</span></div>';
+      }
+    } else {
+      h += '<div style="font-size:11px;color:var(--dim);padding:18px;text-align:center">No threats detected \u2014 input appears safe.</div>';
+    }
+
+  } else if (activeTab === "matches") {
+    if (r.matches.length === 0) {
+      h += '<div style="font-size:11px;color:var(--dim);padding:18px;text-align:center">No rule matches.</div>';
+    } else {
+      for (var k = 0; k < r.matches.length; k++) {
+        var m2 = r.matches[k];
+        h += '<div class="detail-card"><div class="detail-head">'
+           + '<span class="detail-title">Rule #' + m2.ruleId + '</span>'
+           + '<span class="sev sev-' + m2.severity + '">' + m2.severity + '</span>'
+           + '<span class="detail-act detail-act-' + m2.action + '">' + m2.action + '</span></div>'
+           + '<div style="font-size:11px;color:var(--text);margin-bottom:6px">' + escHtml(m2.msg) + '</div>'
+           + '<div class="detail-meta">Phase: ' + m2.phase + ' \u00B7 Tag: ' + escHtml(m2.tag) + ' \u00B7 Patterns matched: ' + m2.matchCount + '</div>'
+           + '<div class="detail-patterns">' + escHtml(m2.patternStrs.join("  ,  ")) + '</div></div>';
+      }
+    }
+
+  } else if (activeTab === "sanitized") {
+    h += '<div class="label"><span class="arrow" style="color:var(--orange)">\u25B8</span>Original input</div>'
+       + '<pre class="code' + (r.disruptive ? " strike" : "") + '">' + escHtml(raw) + '</pre>'
+       + '<div class="label gap16"><span class="arrow" style="color:var(--green)">\u25B8</span>Sanitized output</div>'
+       + '<pre class="code safe">' + escHtml(r.sanitized) + '</pre>'
+       + '<div class="note">Dangerous tags removed \u00B7 Event handlers stripped \u00B7 HTML entities escaped</div>';
+
+  } else if (activeTab === "audit") {
+    var audit = {
+      transaction: { id: r.txId, timestamp: r.ts, duration_us: parseInt(r.durationUs, 10), engine: "Coraza WAF (Simulated)" },
+      request: { input_text: raw, length: raw.length },
+      analysis: {
+        disruptive_action: r.action, anomaly_score: r.anomalyScore, rules_matched: r.matches.length,
+        matched_rules: r.matches.map(function (m3) { return { id: m3.ruleId, severity: m3.severity, action: m3.action, msg: m3.msg, tag: m3.tag }; })
+      },
+      sanitization: { output: r.sanitized }
+    };
+    h += '<pre class="code audit">' + escHtml(JSON.stringify(audit, null, 2)) + '</pre>';
+  }
+
+  h += '</div>';
+
+  // ── History ──
+  if (scanHistory.length > 1) {
+    h += '<div class="hist"><div class="label">Recent scans (' + scanHistory.length + ')</div>';
+    var max = Math.min(scanHistory.length, 6);
+    for (var n = 0; n < max; n++) {
+      var ent = scanHistory[n];
+      h += '<div class="hist-item' + (n === 0 ? " cur" : "") + '" data-hi="' + n + '">'
+         + '<span class="hist-dot ' + (ent.result.disruptive ? "bad" : "ok") + '"></span>'
+         + '<span class="hist-txt">' + escHtml(ent.input) + '</span>'
+         + '<span class="hist-n">' + ent.result.matches.length + ' rules</span></div>';
+    }
+    h += '</div>';
+  }
+
+  h += '</div>';
+
+  resultsDiv.innerHTML = h;
+  resultsDiv.classList.remove("hidden");
+
+  // ── Bind tabs ──
+  var tabBtns = resultsDiv.querySelectorAll(".tab");
+  for (var ti = 0; ti < tabBtns.length; ti++) {
+    tabBtns[ti].addEventListener("click", function (e) {
+      activeTab = /** @type {HTMLElement} */ (e.currentTarget).getAttribute("data-tab") || "overview";
+      render();
+    });
+  }
+
+  // ── Bind scanHistory ──
+  var histItems = resultsDiv.querySelectorAll(".hist-item");
+  for (var hi = 0; hi < histItems.length; hi++) {
+    histItems[hi].addEventListener("click", function (e) {
+      var idx = parseInt(/** @type {HTMLElement} */ (e.currentTarget).getAttribute("data-hi") || "0", 10);
+      var ent2 = scanHistory[idx];
+      if (ent2) {
+        inputBox.value = ent2.input;
+        currentResult = ent2.result;
+        inputBox.classList.add("locked");
+        syncUI();
+        render();
+      }
+    });
+  }
+}
+</script>
+</body>
+</html>
